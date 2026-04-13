@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Databáze (nechceme sdílet lokální data)
+*.db
+
+# Virtuální prostředí
+venv/
+.venv/
+
+# IDE nastavení
+.vscode/
+.idea/
+
+# Složka se nahranými soubory (z tvého main.py)
+storage/
