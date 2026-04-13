@@ -1,7 +1,8 @@
 from pydantic import BaseModel
 
+
 class FileResponse(BaseModel):
-    id: str 
+    id: str
     filename: str
     size: int
 
@@ -14,6 +15,8 @@ class BucketBilling(BaseModel):
     ingress_bytes: int
     egress_bytes: int
     internal_transfer_bytes: int
+    count_write_requests: int
+    count_read_requests: int
 
     class Config:
         from_attributes = True
