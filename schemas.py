@@ -17,3 +17,16 @@ class BucketBilling(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BucketCreate(BaseModel):
+    name: str | None = None
+
+
+class BucketResponse(BaseModel):
+    id: str
+    name: str | None = None
+    files: list[FileResponse] = []
+
+    class Config:
+        from_attributes = True

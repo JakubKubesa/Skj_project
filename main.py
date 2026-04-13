@@ -1,6 +1,7 @@
 import os
 import shutil
 from fastapi import FastAPI, UploadFile, Depends, HTTPException, Request
+from typing import List
 from fastapi.responses import FileResponse as FastAPIFileResponse
 from sqlalchemy.orm import Session
 from database import engine, get_db, Base
@@ -72,6 +73,22 @@ async def get_file(file_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="File not found")
     
     return FastAPIFileResponse(path=db_file.path, filename=db_file.filename)
+
+
+@app.post("/buckets/", response_model=schemas.BucketResponse)
+async def create_bucket(bucket_in: schemas.BucketCreate, db: Session = Depends(get_db)) -> schemas.BucketResponse:
+    bucket = models.Bucket(name=bucket_in.name)
+    db.add(bucket)
+    db.commit()
+    db.refresh(bucket)
+    # ensure files relationship is present (empty list)
+    return schemas.BucketResponse(id=bucket.id, name=bucket.name, files=[])
+
+
+@app.get("/buckets/{bucket_id}/objects/", response_model=List[schemas.FileResponse])
+async def list_bucket_objects(bucket_id: str, db: Session = Depends(get_db)) -> List[schemas.FileResponse]:
+    files = db.query(models.FileModel).filter(models.FileModel.bucket_id == bucket_id).all()
+    return files
 
 @app.delete("/files/{file_id}")
 async def delete_file(file_id: str, db: Session = Depends(get_db)): # Změněno na str
