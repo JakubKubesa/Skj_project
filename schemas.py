@@ -7,3 +7,13 @@ class FileResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BucketBilling(BaseModel):
+    current_storage_bytes: int
+    ingress_bytes: int
+    egress_bytes: int
+    internal_transfer_bytes: int
+
+    class Config:
+        from_attributes = True
