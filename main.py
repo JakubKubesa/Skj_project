@@ -1,14 +1,16 @@
 import os
 import shutil
-from typing import List
+import asyncio
+from typing import List, Dict, Set, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse as FastAPIFileResponse
 from sqlalchemy.orm import Session
 
 import models
 import schemas
 from database import Base, engine, get_db
+from broker_utils import manager
 
 Base.metadata.create_all(bind=engine)
 
@@ -187,3 +189,33 @@ async def get_bucket_billing(bucket_id: str, db: Session = Depends(get_db)) -> s
         count_write_requests=bucket.count_write_requests or 0,
         count_read_requests=bucket.count_read_requests or 0,
     )
+
+
+@app.websocket("/ws/broker/{topic}")
+async def broker_ws(websocket: WebSocket, topic: str):
+    """WebSocket endpoint for the simple in-process broker.
+
+    - Registers client under `topic` on connect
+    - Receives text or binary messages and broadcasts them to other clients in the same topic
+    - Ensures cleanup on disconnect or error
+    """
+    await manager.connect(websocket, topic)
+    try:
+        while True:
+            data = await websocket.receive()
+            # websocket.receive() returns a dict with either 'text' or 'bytes'
+            if "text" in data and data["text"] is not None:
+                await manager.broadcast(data["text"], topic, sender=websocket)
+            elif "bytes" in data and data["bytes"] is not None:
+                await manager.broadcast(data["bytes"], topic, sender=websocket)
+            else:
+                # ignore other message types
+                continue
+    except WebSocketDisconnect:
+        # normal client disconnect
+        pass
+    except Exception:
+        # swallow unexpected errors to ensure cleanup runs
+        pass
+    finally:
+        await manager.disconnect(websocket, topic)
