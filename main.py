@@ -1,15 +1,18 @@
 import os
 import shutil
 import asyncio
-from typing import List, Dict, Set, Optional
+import json
+from typing import Any, List, Dict, Set, Optional
 
+import msgpack
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse as FastAPIFileResponse
 from sqlalchemy.orm import Session
 
 import models
 import schemas
-from database import Base, engine, get_db
+from database import Base, engine, get_db, SessionLocal
 from broker_utils import manager
 
 Base.metadata.create_all(bind=engine)
@@ -191,26 +194,176 @@ async def get_bucket_billing(bucket_id: str, db: Session = Depends(get_db)) -> s
     )
 
 
+def serialize_payload(payload: Any, payload_format: str) -> bytes:
+    if payload_format == "msgpack":
+        return msgpack.packb(payload, use_bin_type=True)
+    return json.dumps(payload).encode("utf-8")
+
+
+def deserialize_payload(payload: bytes, payload_format: str) -> Any:
+    if payload_format == "msgpack":
+        return msgpack.unpackb(payload, raw=False)
+    return json.loads(payload.decode("utf-8"))
+
+
+def queued_message_to_deliver(message: models.QueuedMessage) -> Dict[str, Any]:
+    return {
+        "action": "deliver",
+        "topic": message.topic,
+        "message_id": message.id,
+        "payload": deserialize_payload(message.payload, message.payload_format),
+    }
+
+
+def store_queued_message(topic: str, payload: Any, payload_format: str) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        db_message = models.QueuedMessage(
+            topic=topic,
+            payload=serialize_payload(payload, payload_format),
+            payload_format=payload_format,
+            is_delivered=False,
+        )
+        db.add(db_message)
+        db.commit()
+        db.refresh(db_message)
+        return queued_message_to_deliver(db_message)
+    finally:
+        db.close()
+
+
+def load_pending_messages(topic: str) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        messages = (
+            db.query(models.QueuedMessage)
+            .filter(
+                models.QueuedMessage.topic == topic,
+                models.QueuedMessage.is_delivered.is_(False),
+            )
+            .order_by(models.QueuedMessage.id.asc())
+            .all()
+        )
+        return [queued_message_to_deliver(message) for message in messages]
+    finally:
+        db.close()
+
+
+def acknowledge_message(message_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        db_message = db.get(models.QueuedMessage, message_id)
+        if not db_message or db_message.is_delivered:
+            return False
+
+        db_message.is_delivered = True
+        db.add(db_message)
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def decode_broker_message(data: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    if data.get("text") is not None:
+        return json.loads(data["text"]), "json"
+    if data.get("bytes") is not None:
+        return msgpack.unpackb(data["bytes"], raw=False), "msgpack"
+    return None, None
+
+
+def build_transient_deliver_message(topic: str, payload: Any) -> Dict[str, Any]:
+    return {
+        "action": "deliver",
+        "topic": topic,
+        "message_id": None,
+        "payload": payload,
+    }
+
+
 @app.websocket("/ws/broker/{topic}")
 async def broker_ws(websocket: WebSocket, topic: str):
-    """WebSocket endpoint for the simple in-process broker.
+    """WebSocket endpoint for the durable in-process broker."""
+    mode = websocket.query_params.get("mode", "json").lower()
+    if mode not in ("json", "msgpack"):
+        mode = "json"
+    role = websocket.query_params.get("role", "subscriber").lower()
+    is_subscriber = role != "publisher"
+    durable = websocket.query_params.get("durable", "true").lower() not in ("0", "false", "no")
 
-    - Registers client under `topic` on connect
-    - Receives text or binary messages and broadcasts them to other clients in the same topic
-    - Ensures cleanup on disconnect or error
-    """
-    await manager.connect(websocket, topic)
+    await manager.connect(websocket, topic, mode, subscribe=is_subscriber)
     try:
+        if is_subscriber and durable:
+            pending_messages = await run_in_threadpool(load_pending_messages, topic)
+            for pending_message in pending_messages:
+                await manager.send_protocol_message(websocket, pending_message)
+
         while True:
             data = await websocket.receive()
-            # websocket.receive() returns a dict with either 'text' or 'bytes'
-            if "text" in data and data["text"] is not None:
-                await manager.broadcast(data["text"], topic, sender=websocket)
-            elif "bytes" in data and data["bytes"] is not None:
-                await manager.broadcast(data["bytes"], topic, sender=websocket)
-            else:
-                # ignore other message types
+
+            if data.get("type") == "websocket.disconnect":
+                break
+
+            try:
+                message, payload_format = decode_broker_message(data)
+            except Exception:
+                await manager.send_protocol_message(
+                    websocket,
+                    {"action": "error", "detail": "Invalid message format"},
+                )
                 continue
+
+            if not message:
+                continue
+
+            action = message.get("action")
+            if action == "publish":
+                publish_topic = message.get("topic")
+                if publish_topic != topic:
+                    await manager.send_protocol_message(
+                        websocket,
+                        {
+                            "action": "error",
+                            "detail": "Publish topic must match the WebSocket topic",
+                            "topic": topic,
+                        },
+                    )
+                    continue
+
+                if durable:
+                    deliver_message = await run_in_threadpool(
+                        store_queued_message,
+                        topic,
+                        message.get("payload"),
+                        payload_format or mode,
+                    )
+                else:
+                    deliver_message = build_transient_deliver_message(topic, message.get("payload"))
+                await manager.broadcast(deliver_message, topic)
+            elif action == "ack":
+                try:
+                    message_id = int(message.get("message_id"))
+                except (TypeError, ValueError):
+                    await manager.send_protocol_message(
+                        websocket,
+                        {"action": "error", "detail": "Invalid ACK message_id"},
+                    )
+                    continue
+
+                acked = await run_in_threadpool(acknowledge_message, message_id)
+                await manager.send_protocol_message(
+                    websocket,
+                    {
+                        "action": "ack",
+                        "message_id": message_id,
+                        "status": "ok" if acked else "ignored",
+                    },
+                )
+            else:
+                await manager.send_protocol_message(
+                    websocket,
+                    {"action": "error", "detail": f"Unsupported action: {action}"},
+                )
     except WebSocketDisconnect:
         # normal client disconnect
         pass
