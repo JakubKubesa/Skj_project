@@ -99,7 +99,7 @@ async def publisher(name: str, uri: str, mode: str, messages: int, start_time_ho
     return sent
 
 
-async def run_benchmark(mode: str, topic: str, n_publishers: int = 5, n_subscribers: int = 5, messages_per_publisher: int = 10000, durable: bool = False):
+async def run_benchmark(mode: str, topic: str, n_publishers: int = 5, n_subscribers: int = 5, messages_per_publisher: int = 2000, durable: bool = False):
     durable_value = "true" if durable else "false"
     subscriber_uri = f"ws://localhost:8000/ws/broker/{topic}?mode={mode}&role=subscriber&durable={durable_value}"
     publisher_uri = f"ws://localhost:8000/ws/broker/{topic}?mode={mode}&role=publisher&durable={durable_value}"

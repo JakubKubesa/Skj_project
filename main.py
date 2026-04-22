@@ -22,6 +22,37 @@ app = FastAPI()
 STORAGE_DIR = "storage"
 
 
+# ensure storage dir exists
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+
+@app.get("/buckets/{bucket_id}/objects/{object_id}")
+async def get_bucket_object(bucket_id: str, object_id: str):
+    """Return a file stored under storage/{bucket_id}/{object_id}.
+
+    This acts as a simple S3 gateway GET endpoint used by workers.
+    """
+    bucket_dir = os.path.join(STORAGE_DIR, bucket_id)
+    file_path = os.path.join(bucket_dir, object_id)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Object not found")
+    return FastAPIFileResponse(path=file_path, filename=object_id)
+
+
+@app.post("/buckets/{bucket_id}/objects/{object_id}/upload")
+async def upload_bucket_object(bucket_id: str, object_id: str, file: UploadFile):
+    """Accept a file upload and store it under storage/{bucket_id}/{object_id}.
+
+    This acts as a simple S3 gateway POST endpoint used by workers.
+    """
+    bucket_dir = os.path.join(STORAGE_DIR, bucket_id)
+    os.makedirs(bucket_dir, exist_ok=True)
+    dst = os.path.join(bucket_dir, object_id)
+    with open(dst, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"status": "ok", "bucket_id": bucket_id, "object_id": object_id}
+
+
 def increment_bucket_request_counter(bucket: models.Bucket, counter_name: str) -> None:
     current_value = getattr(bucket, counter_name, 0) or 0
     setattr(bucket, counter_name, current_value + 1)

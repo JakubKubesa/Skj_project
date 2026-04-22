@@ -257,3 +257,27 @@ Díky tomu synchronní práce s databází neběží přímo v async event loopu
 ## Jak části souvisí
 
 `mb_client.py` se připojuje na WebSocket endpoint v `main.py`. `main.py` používá `ConnectionManager` z `broker_utils.py`, model `QueuedMessage` z `models.py` a session z `database.py`. Migrace v `alembic/` vytváří tabulku pro durable queue. `test_broker.py` ověřuje chování brokeru a `benchmark.py` měří výkon.
+
+
+
+
+
+
+
+
+
+
+
+## Asynchronní zpracování dat
+Spusť server: uvicorn main:app --reload
+
+Spusť Workera: python worker.py (měl by vypsat, že je připojen).
+
+
+ve fastAPI nahraj (2. operace v pořadí) obrázek do úložiště
+
+pak změníš send_test.py (nazev obrazku v ulozisti)
+
+ve 3. terminalu posles: python send_test.py
+
+
