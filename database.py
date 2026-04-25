@@ -1,3 +1,9 @@
+"""Database configuration shared by the REST API, worker, and tests.
+
+The project uses a local SQLite database for metadata, bucket accounting, and
+queued broker messages. SQLAlchemy sessions are created through SessionLocal.
+"""
+
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -12,10 +18,12 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 class Base(DeclarativeBase):
-    pass
+    """Declarative base for all ORM models in the project."""
+
 
 
 def get_db():
+    """Yield one SQLAlchemy session for a FastAPI request lifecycle."""
     db = SessionLocal()
     try:
         yield db

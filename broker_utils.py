@@ -1,25 +1,40 @@
+"""Connection manager for the in-process WebSocket message broker.
+
+The broker groups WebSocket subscribers by topic and remembers whether each
+client speaks JSON or MessagePack on the wire.
+"""
+
 import asyncio
 import json
-from typing import Any, Dict, Set, Optional
+from typing import Any, Dict, Optional, Set
 
 import msgpack
-
 from fastapi import WebSocket
 
 
 class ConnectionManager:
+    """Keep track of topic subscribers and send protocol messages to them.
+
+    Attributes:
+        topics: Mapping of topic name to currently subscribed WebSocket clients.
+        client_formats: Preferred serialization format per WebSocket.
     """
-    Manages WebSocket connections grouped by topic.
-    Uses dict[str, set[WebSocket]] to store connected sockets per topic.
-    Stores the preferred wire format for each client.
-    """
+
     def __init__(self) -> None:
         self.topics: Dict[str, Set[WebSocket]] = {}
         self.client_formats: Dict[WebSocket, str] = {}
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket, topic: str, mode: str = "json", subscribe: bool = True) -> None:
-        """Accept the socket and register it under the given topic."""
+        """Accept a socket and optionally register it as a topic subscriber.
+
+        Args:
+            websocket: Connected client socket.
+            topic: Topic name handled by the route.
+            mode: Serialization format, either ``json`` or ``msgpack``.
+            subscribe: Publishers can connect without being added to the
+                subscriber set; subscribers are tracked in ``self.topics``.
+        """
         await websocket.accept()
         async with self._lock:
             if subscribe:
@@ -27,7 +42,10 @@ class ConnectionManager:
             self.client_formats[websocket] = mode
 
     async def disconnect(self, websocket: WebSocket, topic: str) -> None:
-        """Remove the socket from the topic; delete topic if empty."""
+        """Remove a socket from broker bookkeeping.
+
+        Empty topics are removed to keep the in-memory structure compact.
+        """
         async with self._lock:
             self.client_formats.pop(websocket, None)
             sockets = self.topics.get(topic)
@@ -35,11 +53,10 @@ class ConnectionManager:
                 return
             sockets.discard(websocket)
             if not sockets:
-                # remove empty topic to keep structure clean
                 del self.topics[topic]
 
     async def send_protocol_message(self, websocket: WebSocket, message: Dict[str, Any]) -> None:
-        """Send a protocol message using the recipient's preferred wire format."""
+        """Serialize and send one protocol message to a single client."""
         mode = self.client_formats.get(websocket, "json")
         if mode == "msgpack":
             await websocket.send_bytes(msgpack.packb(message, use_bin_type=True))
@@ -47,8 +64,12 @@ class ConnectionManager:
             await websocket.send_text(json.dumps(message))
 
     async def broadcast(self, message: Dict[str, Any], topic: str, sender: Optional[WebSocket] = None) -> None:
-        """Send a protocol message to all sockets in `topic` except `sender`.
-        We copy the receivers under the lock and perform network I/O outside the lock.
+        """Send a protocol message to all subscribers of a topic.
+
+        Args:
+            message: Already validated broker envelope.
+            topic: Target topic.
+            sender: Optional socket to exclude from broadcast.
         """
         async with self._lock:
             receivers = {ws for ws in self.topics.get(topic, set()) if ws is not sender}
@@ -57,7 +78,6 @@ class ConnectionManager:
             try:
                 await self.send_protocol_message(ws, message)
             except Exception:
-                # on failure, attempt to remove the socket so state stays consistent
                 try:
                     await self.disconnect(ws, topic)
                 except Exception:
@@ -66,5 +86,4 @@ class ConnectionManager:
         await asyncio.gather(*(send_one(ws) for ws in receivers))
 
 
-# single manager instance to import/use from the app
 manager = ConnectionManager()

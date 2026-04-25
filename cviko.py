@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, select
+"""Legacy standalone SQLAlchemy practice script.`n`nThis file is not imported by the FastAPI app, worker, broker, or tests. It is`nkept only as a separate exercise/reference and should not be treated as active`nproject runtime code.`n"""`n`nfrom sqlalchemy import ForeignKey, create_engine, Column, Integer, String, select
 from sqlalchemy.orm import declarative_base, Session, Mapped, mapped_column, relationship
 
 engine = create_engine('sqlite:///users.db', echo=True)

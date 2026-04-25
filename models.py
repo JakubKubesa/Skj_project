@@ -1,3 +1,5 @@
+"""SQLAlchemy ORM models for buckets, stored objects, and durable broker messages."""
+
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -9,6 +11,8 @@ from database import Base
 
 
 class Bucket(Base):
+    """Bucket metadata plus billing counters for the personal cloud API."""
+
     __tablename__ = "buckets"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -21,25 +25,31 @@ class Bucket(Base):
     count_write_requests: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     count_read_requests: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
-    files = relationship("FileModel", back_populates="bucket")
+    # Relationship used by the bucket/object API. Object rows stay in the table
+    # even after soft delete; API queries filter out deleted rows explicitly.
+    objects = relationship("ObjectModel", back_populates="bucket")
 
 
-class FileModel(Base):
-    __tablename__ = "files"
+class ObjectModel(Base):
+    """Stored object metadata tracked in the bucket/object API."""
+
+    __tablename__ = "objects"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String, index=True)
-    filename: Mapped[str] = mapped_column(String)
+    object_key: Mapped[str] = mapped_column(String)
     path: Mapped[str] = mapped_column(String)
     size: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
 
     bucket_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("buckets.id"), index=True, nullable=True)
-    bucket = relationship("Bucket", back_populates="files")
+    bucket = relationship("Bucket", back_populates="objects")
 
 
 class QueuedMessage(Base):
+    """Durable message persisted by the broker until acknowledged."""
+
     __tablename__ = "queued_messages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -1,3 +1,5 @@
+"""Simple CLI client for manual broker publish/subscribe testing."""
+
 import asyncio
 import json
 from typing import Any
@@ -6,7 +8,9 @@ import msgpack
 import websockets
 
 
+
 def parse_message(value: Any) -> Any:
+    """Try to parse a JSON literal from CLI input; otherwise return the raw value."""
     if value is None:
         return None
     try:
@@ -15,13 +19,17 @@ def parse_message(value: Any) -> Any:
         return value
 
 
+
 def encode_message(message: dict[str, Any], mode: str) -> str | bytes:
+    """Encode one broker envelope for JSON or MessagePack transport."""
     if mode == "msgpack":
         return msgpack.packb(message, use_bin_type=True)
     return json.dumps(message)
 
 
+
 def decode_message(data: str | bytes, mode: str) -> dict[str, Any] | Any:
+    """Decode one broker frame according to the selected wire format."""
     if isinstance(data, bytes):
         if mode == "msgpack":
             return msgpack.unpackb(data, raw=False)
@@ -30,12 +38,7 @@ def decode_message(data: str | bytes, mode: str) -> dict[str, Any] | Any:
 
 
 async def run_client(topic: str, mode: str, action: str, message: Any = None) -> None:
-    """Run a durable broker client.
-
-    - mode: 'json' or 'msgpack'
-    - action: 'subscribe' or 'publish'
-    - message: payload for publish
-    """
+    """Run a small durable broker client for ad hoc manual testing."""
     if mode not in ("json", "msgpack"):
         raise ValueError("mode must be 'json' or 'msgpack'")
     if action not in ("subscribe", "publish"):
