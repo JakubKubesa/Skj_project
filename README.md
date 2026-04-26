@@ -1,4 +1,4 @@
-# SKJ Project - Personal Cloud, Message Broker, Image Worker
+﻿# SKJ Project - Personal Cloud, Message Broker, Image Worker
 
 ## Spusteni projektu
 
@@ -186,19 +186,119 @@ Poznamka:
 - skutecne zpracovani dela `worker.py`,
 - worker musi bezet zvlast.
 
-### `WS /ws/broker/{topic}`
-WebSocket endpoint pro message broker.
+#### Dokumentace obrazkovych operaci
 
-Query parametry:
-- `mode=json|msgpack`
-- `role=subscriber|publisher`
-- `durable=true|false`
+Pro vsechny operace plati stejny zaklad:
 
-Podporovane akce:
-- `publish`
-- `ack`
+- `bucket_id` je v URL,
+- `object_key` je v URL,
+- JSON body obsahuje:
+  - `operation`
+  - `params`
 
-Priklady broker zprav:
+Do JSON body se neposila:
+- `bucket_id`
+- `object_key`
+- `user_id`
+
+Tyto hodnoty si aplikace bere z URL a z databaze.
+
+##### `invert`
+Negativ obrazu.
+
+Parametry:
+- zadne
+
+Priklad:
+
+```json
+{
+  "operation": "invert",
+  "params": {}
+}
+```
+
+##### `flip`
+Horizontalni preklopeni obrazu.
+
+Parametry:
+- zadne
+
+Priklad:
+
+```json
+{
+  "operation": "flip",
+  "params": {}
+}
+```
+
+##### `grayscale`
+Prevod obrazu do sedotonu.
+
+Parametry:
+- zadne
+
+Priklad:
+
+```json
+{
+  "operation": "grayscale",
+  "params": {}
+}
+```
+
+##### `brightness`
+Zesvetleni nebo ztmaveni obrazu.
+
+Parametry:
+- `value` - cele cislo (`int`)
+  - kladne cislo obrazek zesvetli,
+  - zaporne cislo obrazek ztmavi,
+  - `0` znamena bez zmeny.
+
+Priklad:
+
+```json
+{
+  "operation": "brightness",
+  "params": {
+    "value": 50
+  }
+}
+```
+
+##### `crop`
+Orez obrazu podle leveho horniho rohu a rozmeru vyrezu.
+
+Povinne parametry:
+- `x_start` - horizontalni zacatek vyrezu,
+- `y_start` - vertikalni zacatek vyrezu,
+- `width` - sirka vyrezu,
+- `height` - vyska vyrezu.
+
+Pravidla:
+- vsechny hodnoty musi byt `int`,
+- `width` musi byt vetsi nez `0`,
+- `height` musi byt vetsi nez `0`,
+- `x_start` a `y_start` musi byt nezaporne,
+- vyrez musi zustat uvnitr obrazku, jinak worker vrati chybu.
+
+Priklad:
+
+```json
+{
+  "operation": "crop",
+  "params": {
+    "x_start": 10,
+    "y_start": 20,
+    "width": 200,
+    "height": 150
+  }
+}
+```
+
+### Priklady broker zprav:
 
 Publisher:
 
@@ -320,33 +420,6 @@ Co testy overuji:
   - ACK durable zprav,
   - spolupraci serveru, brokeru a workera.
 
-## Spusteni benchmarku
-
-Nejdriv musi bezet server:
-
-```bash
-uvicorn main:app --reload
-```
-
-Potom benchmark:
-
-```bash
-python benchmark.py --mode json
-python benchmark.py --mode msgpack
-```
-
-Rozsirene varianty:
-
-```bash
-python benchmark.py --mode json --publishers 5 --subscribers 5 --messages 10000
-python benchmark.py --mode msgpack --publishers 5 --subscribers 5 --messages 10000
-```
-
-Durable benchmark:
-
-```bash
-python benchmark.py --mode json --publishers 2 --subscribers 2 --messages 100 --durable
-```
 
 ## Manualni broker klient
 
@@ -383,3 +456,4 @@ python mb_client.py sensors msgpack publish --message '{"temperature": 22.5}'
 - soft delete je logicky, ne fyzicky delete souboru.
 - durable broker pouziva globalni ACK model: po prvnim platnem ACK se zprava oznaci jako dorucena.
 - pokud menis schema, spust znovu `alembic upgrade head`.
+
