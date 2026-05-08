@@ -5,6 +5,7 @@ Revises: c2d4e6f8a0b1
 Create Date: 2026-04-24 00:30:00.000000
 
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -25,20 +26,16 @@ NEW_BUCKET_INDEX = "ix_objects_bucket_id"
 NEW_USER_INDEX = "ix_objects_user_id"
 
 
-
 def _table_names(bind) -> set[str]:
     return set(sa.inspect(bind).get_table_names())
-
 
 
 def _column_names(bind, table_name: str) -> set[str]:
     return {column["name"] for column in sa.inspect(bind).get_columns(table_name)}
 
 
-
 def _index_names(bind, table_name: str) -> set[str]:
     return {index["name"] for index in sa.inspect(bind).get_indexes(table_name)}
-
 
 
 def upgrade() -> None:
@@ -81,7 +78,6 @@ def upgrade() -> None:
             batch_op.create_index(NEW_BUCKET_INDEX, ["bucket_id"], unique=False)
         if NEW_USER_INDEX not in index_names:
             batch_op.create_index(NEW_USER_INDEX, ["user_id"], unique=False)
-
 
 
 def downgrade() -> None:
