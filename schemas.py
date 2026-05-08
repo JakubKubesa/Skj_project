@@ -90,6 +90,35 @@ class BucketResponse(StrictSchema):
     objects: list[ObjectResponse] = Field(default_factory=list)
 
 
+class UserPublic(StrictSchema):
+    """Public user data returned to the authenticated web client."""
+
+    id: str
+    username: str
+    bucket_id: str
+
+
+class RegisterRequest(StrictSchema):
+    """Registration payload for the MUJ CLOUDIK web client."""
+
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginRequest(StrictSchema):
+    """Login payload for the MUJ CLOUDIK web client."""
+
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class AuthResponse(StrictSchema):
+    """Bearer token response after login or registration."""
+
+    token: str
+    user: UserPublic
+
+
 class ProcessRequest(StrictSchema):
     """Request body for asynchronous image processing jobs."""
 

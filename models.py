@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for buckets, stored objects, and durable broker messages."""
+"""SQLAlchemy ORM models for users, buckets, stored objects, and broker messages."""
 
 import uuid
 from datetime import datetime
@@ -17,6 +17,7 @@ class Bucket(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("users.id"), index=True, nullable=True)
 
     current_storage_bytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     ingress_bytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
@@ -28,6 +29,33 @@ class Bucket(Base):
     # Relationship used by the bucket/object API. Object rows stay in the table
     # even after soft delete; API queries filter out deleted rows explicitly.
     objects = relationship("ObjectModel", back_populates="bucket")
+    owner = relationship("User", back_populates="buckets")
+
+
+class User(Base):
+    """Application user who owns one or more personal buckets."""
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    buckets = relationship("Bucket", back_populates="owner")
+    sessions = relationship("AuthSession", back_populates="user")
+
+
+class AuthSession(Base):
+    """Bearer token session used by the web client."""
+
+    __tablename__ = "auth_sessions"
+
+    token: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    user = relationship("User", back_populates="sessions")
 
 
 class ObjectModel(Base):

@@ -8,13 +8,17 @@ This module exposes:
 
 import json
 import os
+import hashlib
+import secrets
 import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import msgpack
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse as FastAPIFileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -25,8 +29,15 @@ from database import SessionLocal, get_db
 
 app = FastAPI()
 
+BASE_DIR = Path(__file__).resolve().parent
+WEB_DIR = BASE_DIR / "web"
+WEB_STATIC_DIR = WEB_DIR / "static"
 STORAGE_DIR = "storage"
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "dev-internal-token")
 os.makedirs(STORAGE_DIR, exist_ok=True)
+
+if WEB_STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=WEB_STATIC_DIR), name="static")
 
 
 def bucket_object_path(bucket_id: str, object_key: str) -> str:
@@ -52,6 +63,15 @@ def object_to_response(db_object: models.ObjectModel) -> schemas.ObjectResponse:
     )
 
 
+def file_response(path: str, filename: str) -> FastAPIFileResponse:
+    """Return a file without browser caching so repeated downloads hit billing."""
+    return FastAPIFileResponse(
+        path=path,
+        filename=filename,
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
 
 def get_or_create_bucket(db: Session, bucket_id: str) -> models.Bucket:
     """Load an existing bucket or create it on first object upload."""
@@ -64,6 +84,93 @@ def get_or_create_bucket(db: Session, bucket_id: str) -> models.Bucket:
     db.commit()
     db.refresh(bucket)
     return bucket
+
+
+def normalize_username(username: str) -> str:
+    """Normalize a username for lookup and uniqueness."""
+    return username.strip().lower()
+
+
+def hash_password(password: str) -> str:
+    """Hash one password with PBKDF2 and a per-user salt."""
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000).hex()
+    return f"pbkdf2_sha256${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verify a plaintext password against the stored hash format."""
+    try:
+        algorithm, salt, expected = stored_hash.split("$", 2)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000).hex()
+    return secrets.compare_digest(digest, expected)
+
+
+def create_auth_session(db: Session, user: models.User) -> str:
+    """Create a bearer token for the web client."""
+    token = secrets.token_urlsafe(32)
+    db.add(models.AuthSession(token=token, user_id=user.id))
+    db.commit()
+    return token
+
+
+def get_user_personal_bucket(db: Session, user: models.User) -> models.Bucket:
+    """Return the user's primary bucket, creating it if legacy data is missing it."""
+    bucket = (
+        db.query(models.Bucket)
+        .filter(models.Bucket.user_id == user.id)
+        .order_by(models.Bucket.id.asc())
+        .first()
+    )
+    if bucket:
+        return bucket
+
+    bucket = models.Bucket(name=f"{user.username}-cloud", user_id=user.id)
+    db.add(bucket)
+    db.commit()
+    db.refresh(bucket)
+    return bucket
+
+
+def user_to_public(db: Session, user: models.User) -> schemas.UserPublic:
+    """Serialize authenticated user data with the personal bucket id."""
+    bucket = get_user_personal_bucket(db, user)
+    return schemas.UserPublic(id=user.id, username=user.username, bucket_id=bucket.id)
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
+    """Resolve the current user from a bearer token."""
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+
+    token = auth_header.split(" ", 1)[1].strip()
+    session = db.get(models.AuthSession, token)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
+
+    user = db.get(models.User, session.user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
+    return user
+
+
+def require_internal_request(request: Request) -> None:
+    """Allow only trusted internal callers to use low-level bucket routes."""
+    internal_source = request.headers.get("x-internal-source", "false").lower() == "true"
+    supplied_token = request.headers.get("x-internal-token", "")
+    if not internal_source or not secrets.compare_digest(supplied_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Internal API only")
+
+
+def get_user_bucket_object_or_404(db: Session, user: models.User, object_key: str) -> models.ObjectModel:
+    """Load an active object from the authenticated user's personal bucket."""
+    bucket = get_user_personal_bucket(db, user)
+    return get_bucket_object_or_404(db, bucket.id, object_key)
 
 
 
@@ -196,16 +303,188 @@ def soft_delete_bucket_object(db: Session, bucket_id: str, object_key: str) -> m
     return db_object
 
 
-@app.get("/buckets/{bucket_id}/objects/{object_key}")
+@app.get("/", include_in_schema=False)
+def cloudik_web_client():
+    """Serve the MUJ CLOUDIK web client."""
+    index_path = WEB_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Web client not found")
+    return FastAPIFileResponse(index_path)
+
+
+@app.post("/auth/register", response_model=schemas.AuthResponse)
+def register_user(register_in: schemas.RegisterRequest, db: Session = Depends(get_db)) -> schemas.AuthResponse:
+    """Create a user account and its personal bucket."""
+    username = normalize_username(register_in.username)
+    existing = db.query(models.User).filter(models.User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    user = models.User(username=username, password_hash=hash_password(register_in.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    get_user_personal_bucket(db, user)
+    token = create_auth_session(db, user)
+    return schemas.AuthResponse(token=token, user=user_to_public(db, user))
+
+
+@app.post("/auth/login", response_model=schemas.AuthResponse)
+def login_user(login_in: schemas.LoginRequest, db: Session = Depends(get_db)) -> schemas.AuthResponse:
+    """Authenticate a user and return a bearer token."""
+    username = normalize_username(login_in.username)
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user or not verify_password(login_in.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_auth_session(db, user)
+    return schemas.AuthResponse(token=token, user=user_to_public(db, user))
+
+
+@app.get("/me", response_model=schemas.UserPublic)
+def get_me(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)) -> schemas.UserPublic:
+    """Return the authenticated user profile used by the GUI."""
+    return user_to_public(db, current_user)
+
+
+@app.get("/me/objects", response_model=List[schemas.ObjectResponse])
+def list_my_objects(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[schemas.ObjectResponse]:
+    """Return all active objects in the authenticated user's bucket."""
+    bucket = get_user_personal_bucket(db, current_user)
+    db_objects = (
+        db.query(models.ObjectModel)
+        .filter(
+            models.ObjectModel.bucket_id == bucket.id,
+            models.ObjectModel.is_deleted.is_(False),
+        )
+        .order_by(models.ObjectModel.created_at.desc())
+        .all()
+    )
+    return [object_to_response(db_object) for db_object in db_objects]
+
+
+@app.put("/me/objects/{object_key}")
+def upload_my_object(
+    object_key: str,
+    file: UploadFile,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Upload or replace an object in the authenticated user's bucket."""
+    bucket = get_user_personal_bucket(db, current_user)
+    db_object = save_bucket_object(
+        db,
+        bucket.id,
+        object_key,
+        file,
+        user_id=current_user.id,
+        is_internal=False,
+    )
+    return {
+        "status": "ok",
+        "bucket_id": bucket.id,
+        "object_key": object_key,
+        "record_id": db_object.id,
+        "size": db_object.size,
+    }
+
+
+@app.get("/me/objects/{object_key}")
+def download_my_object(
+    object_key: str,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download one object from the authenticated user's bucket."""
+    db_object = get_user_bucket_object_or_404(db, current_user, object_key)
+    register_object_download(db, db_object, is_internal=False)
+    return file_response(path=db_object.path, filename=db_object.object_key)
+
+
+@app.get("/me/objects/{object_key}/preview", include_in_schema=False)
+def preview_my_object(
+    object_key: str,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return an object preview without counting it as a user download."""
+    db_object = get_user_bucket_object_or_404(db, current_user, object_key)
+    return file_response(path=db_object.path, filename=db_object.object_key)
+
+
+@app.delete("/me/objects/{object_key}")
+def delete_my_object(
+    object_key: str,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Soft delete an object from the authenticated user's bucket."""
+    bucket = get_user_personal_bucket(db, current_user)
+    soft_delete_bucket_object(db, bucket.id, object_key)
+    return {"message": "Object deleted successfully", "bucket_id": bucket.id, "object_key": object_key}
+
+
+@app.get("/me/billing", response_model=schemas.BucketBilling)
+def get_my_billing(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.BucketBilling:
+    """Return billing counters for the authenticated user's bucket."""
+    bucket = get_user_personal_bucket(db, current_user)
+    return schemas.BucketBilling(
+        current_storage_bytes=bucket.current_storage_bytes or 0,
+        ingress_bytes=bucket.ingress_bytes or 0,
+        egress_bytes=bucket.egress_bytes or 0,
+        internal_transfer_bytes=bucket.internal_transfer_bytes or 0,
+        count_write_requests=bucket.count_write_requests or 0,
+        count_read_requests=bucket.count_read_requests or 0,
+    )
+
+
+@app.post("/me/objects/{object_key}/process", response_model=schemas.ProcessResponse)
+async def process_my_object(
+    object_key: str,
+    process_in: schemas.ProcessRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> schemas.ProcessResponse:
+    """Enqueue image processing for an object owned by the current user."""
+    db_object = get_user_bucket_object_or_404(db, current_user, object_key)
+    bucket_id = db_object.bucket_id or get_user_personal_bucket(db, current_user).id
+
+    job_payload = schemas.WorkerJobPayload(
+        operation=process_in.operation,
+        object_key=object_key,
+        bucket_id=bucket_id,
+        user_id=current_user.id,
+        params=process_in.params,
+    ).model_dump()
+    await publish_to_topic("image.jobs", job_payload, payload_format="json", durable=True)
+
+    return schemas.ProcessResponse(
+        status="processing_started",
+        topic="image.jobs",
+        bucket_id=bucket_id,
+        object_key=object_key,
+        operation=process_in.operation,
+    )
+
+
+@app.get("/buckets/{bucket_id}/objects/{object_key}", include_in_schema=False)
 def download_bucket_object(bucket_id: str, object_key: str, request: Request, db: Session = Depends(get_db)):
     """Download one object and account for egress or internal transfer."""
+    require_internal_request(request)
     db_object = get_bucket_object_or_404(db, bucket_id, object_key)
     is_internal = request.headers.get("x-internal-source", "false").lower() == "true"
     register_object_download(db, db_object, is_internal=is_internal)
-    return FastAPIFileResponse(path=db_object.path, filename=db_object.object_key)
+    return file_response(path=db_object.path, filename=db_object.object_key)
 
 
-@app.put("/buckets/{bucket_id}/objects/{object_key}")
+@app.put("/buckets/{bucket_id}/objects/{object_key}", include_in_schema=False)
 def upload_bucket_object(
     bucket_id: str,
     object_key: str,
@@ -224,6 +503,7 @@ def upload_bucket_object(
         user_id: Required owner identifier for every upload, including worker
             rewrites of already existing objects.
     """
+    require_internal_request(request)
     is_internal = request.headers.get("x-internal-source", "false").lower() == "true"
     db_object = save_bucket_object(
         db,
@@ -242,14 +522,16 @@ def upload_bucket_object(
     }
 
 
-@app.post("/buckets/{bucket_id}/objects/{object_key}/process", response_model=schemas.ProcessResponse)
+@app.post("/buckets/{bucket_id}/objects/{object_key}/process", response_model=schemas.ProcessResponse, include_in_schema=False)
 async def process_bucket_object(
     bucket_id: str,
     object_key: str,
+    request: Request,
     process_in: schemas.ProcessRequest,
     db: Session = Depends(get_db),
 ) -> schemas.ProcessResponse:
     """Enqueue an asynchronous image processing job for one object."""
+    require_internal_request(request)
     db_object = get_bucket_object_or_404(db, bucket_id, object_key)
 
     job_payload = schemas.WorkerJobPayload(
@@ -270,9 +552,14 @@ async def process_bucket_object(
     )
 
 
-@app.post("/buckets/", response_model=schemas.BucketResponse)
-def create_bucket(bucket_in: schemas.BucketCreate, db: Session = Depends(get_db)) -> schemas.BucketResponse:
+@app.post("/buckets/", response_model=schemas.BucketResponse, include_in_schema=False)
+def create_bucket(
+    bucket_in: schemas.BucketCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> schemas.BucketResponse:
     """Create a new bucket row and initialize billing counters."""
+    require_internal_request(request)
     bucket = models.Bucket(name=bucket_in.name)
     increment_bucket_request_counter(bucket, "count_write_requests")
     db.add(bucket)
@@ -281,9 +568,10 @@ def create_bucket(bucket_in: schemas.BucketCreate, db: Session = Depends(get_db)
     return schemas.BucketResponse(id=bucket.id, name=bucket.name, objects=[])
 
 
-@app.get("/buckets/{bucket_id}/objects/", response_model=List[schemas.ObjectResponse])
-def list_bucket_objects(bucket_id: str, db: Session = Depends(get_db)) -> List[schemas.ObjectResponse]:
+@app.get("/buckets/{bucket_id}/objects/", response_model=List[schemas.ObjectResponse], include_in_schema=False)
+def list_bucket_objects(bucket_id: str, request: Request, db: Session = Depends(get_db)) -> List[schemas.ObjectResponse]:
     """Return all non-deleted objects stored in one bucket."""
+    require_internal_request(request)
     bucket = db.get(models.Bucket, bucket_id)
     if not bucket:
         raise HTTPException(status_code=404, detail="Bucket not found")
@@ -297,29 +585,24 @@ def list_bucket_objects(bucket_id: str, db: Session = Depends(get_db)) -> List[s
         .order_by(models.ObjectModel.created_at.desc())
         .all()
     )
-    increment_bucket_request_counter(bucket, "count_read_requests")
-    db.add(bucket)
-    db.commit()
     return [object_to_response(db_object) for db_object in db_objects]
 
 
-@app.delete("/buckets/{bucket_id}/objects/{object_key}")
-def delete_bucket_object(bucket_id: str, object_key: str, db: Session = Depends(get_db)):
+@app.delete("/buckets/{bucket_id}/objects/{object_key}", include_in_schema=False)
+def delete_bucket_object(bucket_id: str, object_key: str, request: Request, db: Session = Depends(get_db)):
     """Soft delete one object row from the personal cloud API."""
+    require_internal_request(request)
     soft_delete_bucket_object(db, bucket_id, object_key)
     return {"message": "Object deleted successfully", "bucket_id": bucket_id, "object_key": object_key}
 
 
-@app.get("/buckets/{bucket_id}/billing/", response_model=schemas.BucketBilling)
-def get_bucket_billing(bucket_id: str, db: Session = Depends(get_db)) -> schemas.BucketBilling:
+@app.get("/buckets/{bucket_id}/billing/", response_model=schemas.BucketBilling, include_in_schema=False)
+def get_bucket_billing(bucket_id: str, request: Request, db: Session = Depends(get_db)) -> schemas.BucketBilling:
     """Return current billing counters for a bucket."""
+    require_internal_request(request)
     bucket = db.get(models.Bucket, bucket_id)
     if not bucket:
         raise HTTPException(status_code=404, detail="Bucket not found")
-
-    increment_bucket_request_counter(bucket, "count_read_requests")
-    db.add(bucket)
-    db.commit()
 
     return schemas.BucketBilling(
         current_storage_bytes=bucket.current_storage_bytes or 0,

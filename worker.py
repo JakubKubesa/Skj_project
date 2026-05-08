@@ -12,6 +12,7 @@ import random
 import re
 import signal
 import sys
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -23,9 +24,10 @@ from image_processor import process_image
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 BROKER_BASE_WS = os.getenv("BROKER_BASE_WS", "ws://127.0.0.1:8000")
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "dev-internal-token")
 RECONNECT_BASE = 1.0
 RECONNECT_MAX = 30.0
-INTERNAL_HEADERS = {"x-internal-source": "true"}
+INTERNAL_HEADERS = {"x-internal-source": "true", "x-internal-token": INTERNAL_API_TOKEN}
 ACK_ATTEMPTS = 3
 ACK_RESPONSE_TIMEOUT = 2.0
 
@@ -208,8 +210,9 @@ async def handle_message(raw: Any) -> None:
 
     os.makedirs("temp_in", exist_ok=True)
     os.makedirs("temp_out", exist_ok=True)
-    temp_input = os.path.join("temp_in", job.object_key)
-    temp_output = os.path.join("temp_out", job.object_key)
+    temp_name = f"{message_id or uuid.uuid4().hex}_{os.path.basename(job.object_key)}"
+    temp_input = os.path.join("temp_in", temp_name)
+    temp_output = os.path.join("temp_out", temp_name)
 
     try:
         print(f"[WORKER] Stahuji {job.object_key} z gateway...")
@@ -242,6 +245,13 @@ async def handle_message(raw: Any) -> None:
                 error=str(exc),
             )
         )
+    finally:
+        for temp_path in (temp_input, temp_output):
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as cleanup_exc:
+                print(f"[WORKER] Nepodarilo se smazat docasny soubor {temp_path}: {cleanup_exc}")
 
 
 async def run(stop_event: Optional[asyncio.Event] = None, topic: str = "image.jobs") -> None:
@@ -271,10 +281,31 @@ async def run(stop_event: Optional[asyncio.Event] = None, topic: str = "image.jo
                 print(f"[WORKER] Pripojeno k brokeru: {broker_uri}")
                 backoff = RECONNECT_BASE
 
-                async for message in ws:
+                while not stop.is_set():
+                    recv_task = asyncio.create_task(ws.recv())
+                    stop_task = asyncio.create_task(stop.wait())
+                    done, pending = await asyncio.wait(
+                        {recv_task, stop_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+
+                    if stop_task in done:
+                        recv_task.cancel()
+                        await asyncio.gather(recv_task, return_exceptions=True)
+                        break
+
+                    message = recv_task.result()
                     asyncio.create_task(handle_message(message))
         except asyncio.CancelledError:
             raise
+        except websockets.exceptions.ConnectionClosed:
+            if stop.is_set():
+                break
+            print("[WORKER] Spojeni s brokerem bylo ukonceno.")
         except Exception as exc:
             print(f"[WORKER] Odpojeno / chyba pripojeni: {exc}")
 

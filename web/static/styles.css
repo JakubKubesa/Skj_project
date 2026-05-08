@@ -1,0 +1,296 @@
+:root {
+  --cloud-ink: #273043;
+  --cloud-muted: #667085;
+  --cloud-line: #d8dee9;
+  --cloud-bg: #f4f7fb;
+  --cloud-panel: #ffffff;
+  --cloud-teal: #0f766e;
+  --cloud-teal-dark: #115e59;
+  --cloud-amber: #f59e0b;
+  --cloud-rose: #e11d48;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: var(--cloud-ink);
+  background:
+    linear-gradient(180deg, rgba(15, 118, 110, 0.08), rgba(245, 158, 11, 0.05) 36%, transparent 70%),
+    var(--cloud-bg);
+  font-family: "Segoe UI", sans-serif;
+}
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 16px;
+}
+
+.auth-panel,
+.tool-panel,
+.info-panel {
+  width: 100%;
+  background: var(--cloud-panel);
+  border: 1px solid var(--cloud-line);
+  border-radius: 8px;
+  box-shadow: 0 18px 60px rgba(39, 48, 67, 0.10);
+}
+
+.auth-panel {
+  max-width: 520px;
+  padding: 34px;
+}
+
+.brand-mark,
+.brand-dot {
+  display: inline-grid;
+  place-items: center;
+  color: #ffffff;
+  background: var(--cloud-teal);
+  font-weight: 800;
+}
+
+.brand-mark {
+  width: 54px;
+  height: 54px;
+  border-radius: 8px;
+  margin-bottom: 18px;
+}
+
+.brand-dot {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+h1,
+h2,
+h3 {
+  letter-spacing: 0;
+}
+
+h1 {
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+h2 {
+  font-size: 1.1rem;
+  font-weight: 750;
+  margin-bottom: 16px;
+}
+
+.btn-cloud {
+  --bs-btn-color: #ffffff;
+  --bs-btn-bg: var(--cloud-teal);
+  --bs-btn-border-color: var(--cloud-teal);
+  --bs-btn-hover-color: #ffffff;
+  --bs-btn-hover-bg: var(--cloud-teal-dark);
+  --bs-btn-hover-border-color: var(--cloud-teal-dark);
+}
+
+.btn {
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.form-control,
+.form-select,
+.nav-pills .nav-link,
+.nav-tabs .nav-link {
+  border-radius: 8px;
+}
+
+.cloud-nav {
+  background: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid var(--cloud-line);
+  backdrop-filter: blur(12px);
+  min-height: 78px;
+}
+
+.navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 800;
+  font-size: 1.45rem;
+}
+
+.signed-user {
+  color: var(--cloud-ink);
+  font-size: 1.1rem;
+  font-weight: 750;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cloud-tabs {
+  border-color: var(--cloud-line);
+}
+
+.cloud-tabs .nav-link {
+  color: var(--cloud-muted);
+  border: 0;
+  border-bottom: 3px solid transparent;
+}
+
+.cloud-tabs .nav-link.active {
+  color: var(--cloud-teal);
+  background: transparent;
+  border-bottom-color: var(--cloud-teal);
+}
+
+.tool-panel,
+.info-panel {
+  padding: 22px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 18px;
+}
+
+.picture-card {
+  background: #ffffff;
+  border: 1px solid var(--cloud-line);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(39, 48, 67, 0.08);
+}
+
+.picture-preview {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #e9eef5;
+  object-fit: cover;
+  display: block;
+}
+
+.picture-body {
+  padding: 16px;
+}
+
+.picture-title {
+  font-weight: 750;
+  word-break: break-word;
+  margin-bottom: 4px;
+}
+
+.picture-meta {
+  color: var(--cloud-muted);
+  font-size: 0.9rem;
+}
+
+.operation-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.empty-state {
+  min-height: 300px;
+  display: grid;
+  place-items: center;
+  color: var(--cloud-muted);
+  background: #ffffff;
+  border: 1px dashed var(--cloud-line);
+  border-radius: 8px;
+}
+
+.billing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.billing-card {
+  background: #ffffff;
+  border: 1px solid var(--cloud-line);
+  border-left: 5px solid var(--cloud-teal);
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.billing-card:nth-child(2n) {
+  border-left-color: var(--cloud-amber);
+}
+
+.billing-label {
+  color: var(--cloud-muted);
+  font-size: 0.9rem;
+}
+
+.billing-value {
+  font-size: 1.45rem;
+  font-weight: 800;
+  margin-top: 6px;
+}
+
+.info-list {
+  margin-bottom: 0;
+}
+
+.info-list dt {
+  color: var(--cloud-muted);
+  font-size: 0.85rem;
+  margin-top: 14px;
+}
+
+.info-list dd {
+  margin: 4px 0 0;
+  font-weight: 700;
+  font-size: 1.35rem;
+  word-break: break-word;
+}
+
+@media (max-width: 768px) {
+  .auth-panel {
+    padding: 24px;
+  }
+
+  .cloud-nav {
+    min-height: auto;
+  }
+
+  .navbar-brand {
+    font-size: 1.05rem;
+  }
+
+  .signed-user {
+    font-size: 0.9rem;
+    max-width: 130px;
+  }
+
+  .info-list dd {
+    font-size: 1.05rem;
+  }
+
+  .section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .billing-grid {
+    grid-template-columns: 1fr;
+  }
+}
