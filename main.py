@@ -287,7 +287,8 @@ def soft_delete_bucket_object(db: Session, bucket_id: str, object_key: str) -> m
     This is a logical delete: API reads stop returning the object, but the file
     remains on disk. That behavior is useful for auditing, but it is not a full
     versioned archive because a later upload with the same object key reuses the
-    same file path.
+    same file path. Deletes update storage usage only; they do not count as new
+    write requests.
     """
     db_object = get_bucket_object_or_404(db, bucket_id, object_key)
     db_object.is_deleted = True
@@ -296,7 +297,6 @@ def soft_delete_bucket_object(db: Session, bucket_id: str, object_key: str) -> m
     bucket = db.get(models.Bucket, bucket_id)
     if bucket:
         bucket.current_storage_bytes = max(0, (bucket.current_storage_bytes or 0) - (db_object.size or 0))
-        increment_bucket_request_counter(bucket, "count_write_requests")
         db.add(bucket)
 
     db.commit()

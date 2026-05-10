@@ -188,3 +188,19 @@ class WorkerStatusPayload(StrictSchema):
     bucket_id: str
     object_key: str | None = None
     error: str | None = None
+
+
+class StorageWritePayload(StrictSchema):
+    """Binary object payload delivered to the Haystack storage node."""
+
+    object_id: str = Field(min_length=1)
+    data: bytes
+
+
+class StorageAckPayload(StrictSchema):
+    """Offset metadata emitted after appending an object into a volume."""
+
+    object_id: str = Field(min_length=1)
+    volume_id: int = Field(ge=1)
+    offset: int = Field(ge=0)
+    size: int = Field(ge=0)
