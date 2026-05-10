@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import httpx
 import websockets
+import msgpack
 from pydantic import ValidationError
 
 import schemas
@@ -58,6 +59,17 @@ async def send_status(payload: schemas.WorkerStatusPayload) -> None:
             await ws.send(json.dumps(envelope))
     except Exception as exc:
         print(f"[WORKER] Chyba pri odesilani statusu: {exc}")
+
+
+async def publish_storage_write(object_id: str, data: bytes) -> None:
+    """Publish a storage.write message containing binary data (msgpack mode)."""
+    uri = f"{BROKER_BASE_WS}/ws/broker/storage.write?mode=msgpack&role=publisher&durable=true"
+    envelope = schemas.BrokerPublishMessage(action="publish", topic="storage.write", payload=schemas.StorageWritePayload(object_id=object_id, data=data).model_dump()).model_dump()
+    try:
+        async with websockets.connect(uri) as ws:
+            await ws.send(msgpack.packb(envelope, use_bin_type=True))
+    except Exception as exc:
+        print(f"[WORKER] Failed to publish storage.write for {object_id}: {exc}")
 
 
 async def send_job_ack(message_id: int) -> bool:
@@ -222,7 +234,16 @@ async def handle_message(raw: Any) -> None:
         await asyncio.to_thread(process_image, temp_input, temp_output, job.operation, job.params)
 
         print(f"[WORKER] Nahravam upraveny soubor zpet...")
-        await upload_image(job.bucket_id, job.object_key, job.user_id, temp_output)
+        # If the job specified an object_id, publish the transformed bytes
+        # back to the Haystack storage via the broker so the object is
+        # appended into a new volume and the gateway ACK subscriber will
+        # update metadata in-place.
+        if getattr(job, "object_id", None):
+            with open(temp_output, "rb") as fh:
+                data = fh.read()
+            await publish_storage_write(job.object_id, data)
+        else:
+            await upload_image(job.bucket_id, job.object_key, job.user_id, temp_output)
 
         await ack_if_needed(message_id)
         await send_status(

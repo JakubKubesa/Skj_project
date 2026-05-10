@@ -34,10 +34,13 @@ function hideAlert(element) {
 }
 
 function authHeaders(extra = {}) {
-  return {
-    ...extra,
-    Authorization: `Bearer ${state.token}`,
-  };
+  if (state.token) {
+    return {
+      ...extra,
+      Authorization: `Bearer ${state.token}`,
+    };
+  }
+  return { ...extra };
 }
 
 async function requestJson(path, options = {}) {
@@ -266,6 +269,11 @@ async function processObject(objectKey, card) {
       body: JSON.stringify({ operation, params: collectParams(card) }),
     });
     showAlert(els.appAlert, `${objectKey}: zpracovava se`, "info");
+    // Wait a short moment for the async worker/haystack append to occur,
+    // then refresh the UI so the updated preview appears.
+    setTimeout(async () => {
+      await Promise.all([loadObjects(), loadBilling()]);
+    }, 500);
   } catch (error) {
     showAlert(els.appAlert, error.message, "danger");
   }

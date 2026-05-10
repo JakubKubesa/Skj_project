@@ -26,6 +26,8 @@ import schemas
 BROKER_BASE_WS = os.getenv("BROKER_BASE_WS", "ws://127.0.0.1:8000")
 WRITE_TOPIC = os.getenv("HAYSTACK_WRITE_TOPIC", "storage.write")
 ACK_TOPIC = os.getenv("HAYSTACK_ACK_TOPIC", "storage.ack")
+# Broker wire format (json or msgpack). Default to JSON for compatibility.
+HAYSTACK_BROKER_MODE = os.getenv("HAYSTACK_BROKER_MODE", "msgpack").lower()
 VOLUME_DIR = Path(os.getenv("HAYSTACK_VOLUME_DIR", "haystack_volumes"))
 MAX_VOLUME_SIZE_BYTES = int(os.getenv("HAYSTACK_MAX_VOLUME_SIZE_BYTES", str(100 * 1024 * 1024)))
 READ_MEDIA_TYPE = os.getenv("HAYSTACK_READ_MEDIA_TYPE", "application/octet-stream")
@@ -58,6 +60,7 @@ class HaystackVolumeStore:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         existing_ids = self._discover_existing_volume_ids_sync()
         starting_volume_id = existing_ids[-1] if existing_ids else 1
+        print(f"[HAYSTACK] Starting volume store in {self.base_dir}, discovered volumes: {existing_ids}")
         self._open_volume_sync(starting_volume_id)
 
     async def shutdown(self) -> None:
@@ -79,6 +82,7 @@ class HaystackVolumeStore:
     def _open_volume_sync(self, volume_id: int) -> None:
         self._close_active_sync()
         path = self._volume_path(volume_id)
+        print(f"[HAYSTACK] Opening volume file: {path}")
         handle = open(path, "ab+")
         handle.seek(0, os.SEEK_END)
         self._active_handle = handle
@@ -98,6 +102,7 @@ class HaystackVolumeStore:
 
     def _rotate_volume_sync(self) -> None:
         next_volume_id = 1 if self._active_volume_id is None else self._active_volume_id + 1
+        print(f"[HAYSTACK] Rotating volume: current={self._active_volume_id} next={next_volume_id}")
         self._open_volume_sync(next_volume_id)
 
     async def append_payload(
@@ -131,10 +136,19 @@ class HaystackVolumeStore:
             current_end = self._active_handle.tell()
 
         offset = current_end
+        # Log where we're writing and ensure data is flushed to disk
+        vol_name = f"volume_{self._active_volume_id}.dat"
+        print(f"[HAYSTACK] Writing {len(payload.data)} bytes to {vol_name} at offset {offset}")
         written = self._active_handle.write(payload.data)
         if written != len(payload.data):
             raise IOError("Volume write was incomplete")
+        # Flush Python buffers and force OS to write to disk
         self._active_handle.flush()
+        try:
+            os.fsync(self._active_handle.fileno())
+        except Exception:
+            # fsync may fail on some filesystems or environments; log but continue
+            print(f"[HAYSTACK] Warning: os.fsync failed for {vol_name}")
 
         return schemas.StorageAckPayload(
             object_id=payload.object_id,
@@ -189,25 +203,30 @@ def decode_wire_message(raw: Any) -> dict[str, Any]:
 
 async def publish_storage_ack(ack_payload: schemas.StorageAckPayload) -> None:
     """Publish one successful write acknowledgement to the broker."""
-    uri = build_broker_uri(ACK_TOPIC, role="publisher", durable=True, mode="json")
+    uri = build_broker_uri(ACK_TOPIC, role="publisher", durable=False, mode="msgpack")
     envelope = schemas.BrokerPublishMessage(
         action="publish",
         topic=ACK_TOPIC,
         payload=ack_payload.model_dump(),
     ).model_dump()
-    async with websockets.connect(uri) as ws:
-        await ws.send(json.dumps(envelope))
+    # Log the ack details for diagnostics
+    try:
+        print(f"[HAYSTACK] ACK -> object_id={ack_payload.object_id}, volume_id={ack_payload.volume_id}, offset={ack_payload.offset}, size={ack_payload.size}")
+    except Exception:
+        pass
+    async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+        await ws.send(msgpack.packb(envelope, use_bin_type=True))
 
 
 async def acknowledge_broker_message(message_id: int) -> bool:
     """Confirm durable processing of one broker message id."""
-    uri = build_broker_uri(WRITE_TOPIC, role="publisher", durable=True, mode="json")
+    uri = build_broker_uri(WRITE_TOPIC, role="publisher", durable=False, mode="msgpack")
     envelope = schemas.BrokerAckMessage(action="ack", message_id=message_id).model_dump()
 
     for attempt in range(1, ACK_ATTEMPTS + 1):
         try:
-            async with websockets.connect(uri) as ws:
-                await ws.send(json.dumps(envelope))
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as ws:
+                await ws.send(msgpack.packb(envelope, use_bin_type=True))
                 raw = await asyncio.wait_for(ws.recv(), timeout=ACK_RESPONSE_TIMEOUT)
                 response = decode_wire_message(raw)
                 if response.get("action") == "ack" and response.get("message_id") == message_id:
@@ -265,9 +284,11 @@ async def run_storage_subscriber(stop_event: asyncio.Event, store: HaystackVolum
 
     while not stop_event.is_set():
         try:
-            broker_uri = build_broker_uri(WRITE_TOPIC, role="subscriber", durable=True, mode="msgpack")
+            # Use configured broker wire mode and enable websocket heartbeat pings
+            broker_uri = build_broker_uri(WRITE_TOPIC, role="subscriber", durable=False, mode=HAYSTACK_BROKER_MODE)
             print(f"[HAYSTACK] Connecting to broker: {broker_uri}")
-            async with websockets.connect(broker_uri) as ws:
+            # set ping_interval so the connection stays alive through intermediaries
+            async with websockets.connect(broker_uri, ping_interval=20, ping_timeout=10) as ws:
                 print(f"[HAYSTACK] Connected to broker: {broker_uri}")
                 backoff = RECONNECT_BASE
 

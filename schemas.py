@@ -101,7 +101,10 @@ class UserPublic(StrictSchema):
 class RegisterRequest(StrictSchema):
     """Registration payload for the MUJ CLOUDIK web client."""
 
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    # Allow Unicode word characters so Czech diacritics and other
+    # international usernames are accepted. ``\w`` matches letters,
+    # digits and underscore and is Unicode-aware in Python.
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[\w.\-]+$")
     password: str = Field(min_length=6, max_length=128)
 
 
@@ -139,6 +142,8 @@ class ProcessResponse(StrictSchema):
     bucket_id: str
     object_key: str
     operation: str
+    # Optional cache buster timestamp (milliseconds) to signal clients to reload
+    cache_bust: int | None = None
 
 
 class BrokerPublishMessage(StrictSchema):
@@ -172,6 +177,8 @@ class WorkerJobPayload(StrictSchema):
     object_key: str = Field(min_length=1)
     bucket_id: str = Field(min_length=1)
     user_id: str = Field(min_length=1)
+    # Optional object_id allows in-place overwrites in Haystack flow
+    object_id: str | None = None
     params: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

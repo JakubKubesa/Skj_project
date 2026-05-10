@@ -39,6 +39,12 @@ class ConnectionManager:
         async with self._lock:
             if subscribe:
                 self.topics.setdefault(topic, set()).add(websocket)
+                if topic == "storage.write":
+                    try:
+                        client = websocket.client
+                    except Exception:
+                        client = None
+                    print(f"[BROKER] New subscriber for 'storage.write' (mode={mode}) client={client}")
             self.client_formats[websocket] = mode
 
     async def disconnect(self, websocket: WebSocket, topic: str) -> None:
@@ -61,7 +67,19 @@ class ConnectionManager:
         if mode == "msgpack":
             await websocket.send_bytes(msgpack.packb(message, use_bin_type=True))
         else:
-            await websocket.send_text(json.dumps(message))
+            # Ensure bytes in message are converted to base64 so JSON is valid
+            def _convert(obj):
+                import base64
+                if isinstance(obj, (bytes, bytearray)):
+                    return {"__type": "bytes", "data": base64.b64encode(bytes(obj)).decode("ascii")}
+                if isinstance(obj, dict):
+                    return {k: _convert(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_convert(v) for v in obj]
+                return obj
+
+            safe = _convert(message)
+            await websocket.send_text(json.dumps(safe))
 
     async def broadcast(self, message: Dict[str, Any], topic: str, sender: Optional[WebSocket] = None) -> None:
         """Send a protocol message to all subscribers of a topic.

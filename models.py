@@ -73,6 +73,11 @@ class ObjectModel(Base):
 
     bucket_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("buckets.id"), index=True, nullable=True)
     bucket = relationship("Bucket", back_populates="objects")
+    # New fields for Haystack integration: store where the object was written
+    volume_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    offset: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Upload status used by the Gateway: 'uploading' | 'ready'
+    status: Mapped[str] = mapped_column(String, default="ready", server_default="ready", nullable=False)
 
 
 class QueuedMessage(Base):
