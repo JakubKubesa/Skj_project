@@ -68,6 +68,12 @@ class ObjectModel(Base):
     object_key: Mapped[str] = mapped_column(String)
     path: Mapped[str] = mapped_column(String)
     size: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default="ready", server_default="ready", nullable=False)
+    storage_object_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)
+    volume_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    offset: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pending_previous_size: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    pending_is_internal: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
 

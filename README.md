@@ -21,18 +21,20 @@ Prakticky jde o `S3-like` object storage aplikaci, ne o plne AWS S3 kompatibilni
 
 ## Aktualni stav architektury
 
-Je dobre vedet, co uz je hotove a co je zatim jen pripravene:
+Je dobre vedet, co uz je hotove:
 
 - gateway a broker dnes bezi v jedne FastAPI aplikaci v `main.py`
 - worker je samostatny proces
 - Haystack node je samostatny proces
-- gateway zatim stale fyzicky uklada soubory do adresare `storage/`
-- Haystack node je implementovany, ale gateway na nej zatim neni prepojena
+- uploady pres gateway jdou asynchronne do broker topicu `storage.write`
+- gateway drzi objekt nejdriv ve stavu `uploading` a na `ready` ho prepne az po `storage.ack`
+- gateway umi ready objekty cist z Haystack volume podle `volume_id` + `offset`
 
 To znamena:
 
 - GUI dnes funguje nad gateway + worker flow
-- Haystack endpointy a broker flow `storage.write` / `storage.ack` jdou pouzivat a testovat samostatne
+- billing za upload se zapocita az po prijeti ACK z Haystack node
+- starsi lokalne ulozene soubory porad funguji jako legacy fallback pri cteni
 
 ## Rychle spusteni z konzole
 
@@ -104,6 +106,19 @@ Po spusteni:
 
 - Haystack docs: `http://127.0.0.1:8002/docs`
 - Haystack read endpoint: `http://127.0.0.1:8002/volume/{volume_id}/{offset}/{size}`
+
+### 8. Volitelne spust compaction skript
+
+Kompakce presune jen ready + nesmazane objekty ze stareho volume do noveho volume id a pak muze puvodni soubor smazat.
+
+```bash
+python compact.py 1
+```
+
+Bezpecnostni poznamka:
+
+- skript standardne odmitne compactovat nejvyssi existujici volume id, protoze to typicky byva aktivni append-only volume
+- pri kompakci se pouzije nove `volume_id`, aby cteni zustalo konzistentni i behem presunu
 
 ## Kde co bezi
 
@@ -201,7 +216,10 @@ Tyto endpointy uvidis v `http://127.0.0.1:8000/docs`.
 | `POST` | `/auth/login` | ne | prihlasi uzivatele a vrati bearer token |
 | `GET` | `/me` | ano | vrati profil aktualniho uzivatele |
 | `GET` | `/me/objects` | ano | vrati vsechny aktivni objekty v osobnim bucketu |
-| `PUT` | `/me/objects/{object_key}` | ano | upload nebo prepis objektu |
+| `PUT` | `/me/objects/{object_key}` | ano | prijme upload, ulozi objekt jako `uploading` a vrati `202 Accepted` |
+| `POST` | `/upload` | ano | kompatibilni upload endpoint se stejnym asynchronnim chovanim |
+| `GET` | `/download/{object_id}` | ano | gateway podle DB overi pristup a nacte ready data z Haystacku |
+| `DELETE` | `/download/{object_id}` | ano | provede strict soft delete pouze v DB gateway |
 | `GET` | `/me/objects/{object_key}` | ano | download objektu |
 | `DELETE` | `/me/objects/{object_key}` | ano | soft delete objektu |
 | `GET` | `/me/billing` | ano | billing a request statistiky |
@@ -247,11 +265,12 @@ Vraci:
 
 ```json
 {
-  "status": "ok",
+  "status": "accepted",
+  "topic": "storage.write",
   "bucket_id": "uuid-bucketu",
   "object_key": "pejsek.png",
   "record_id": "uuid-zaznamu",
-  "size": 12345
+  "object_id": "uuid-verejneho-objektu"
 }
 ```
 
@@ -343,6 +362,8 @@ Vyuziva je dnes hlavne worker.
 | `DELETE` | `/buckets/{bucket_id}/objects/{object_key}` | soft delete objektu |
 | `GET` | `/buckets/{bucket_id}/billing/` | billing bucketu |
 | `POST` | `/buckets/{bucket_id}/objects/{object_key}/process` | zaradi processing job pro konkretni bucket/object |
+| `GET` | `/internal/storage/volumes/{volume_id}/objects` | seznam ready objektu pro compaction |
+| `POST` | `/internal/storage/objects/{object_id}/relocate` | update `volume_id` a `offset` po compaction |
 
 Nutne headers:
 
@@ -453,14 +474,24 @@ Durable flow se hodi pro joby, ktere nechces ztratit po restartu nebo reconnectu
 |---|---|---|---|---|
 | `image.jobs` | gateway | worker | ano | joby pro image processing |
 | `image.done` | worker | GUI | ne | live statusy zpracovani |
-| `storage.write` | pripravene pro gateway | Haystack node | ano | binarni write job do volume |
-| `storage.ack` | Haystack node | pripravene pro gateway | ano | potvrzeni zapisu s offset metadata |
+| `storage.write` | gateway | Haystack node | ano | binarni write job do volume |
+| `storage.ack` | Haystack node | gateway ACK listener | ano | potvrzeni zapisu s offset metadata |
 
 ### Statusy v image processing flow
 
 Existuji tri ruzne "status" vrstvy:
 
-#### 1. REST odpoved po odeslani jobu
+#### 1. REST odpoved po odeslani uploadu
+
+Upload endpointy `PUT /me/objects/{object_key}` a `POST /upload` vraci:
+
+- HTTP `202 Accepted`
+- payload `status = accepted`
+- objekt se v DB objevi jako `uploading`
+
+To znamena, ze gateway pozadavek prijala, poslala binarni data do `storage.write`, ale fyzicky zapis jeste nemusi byt potvrzeny.
+
+#### 2. REST odpoved po odeslani image jobu
 
 `POST /me/objects/{object_key}/process` vraci:
 
@@ -468,7 +499,7 @@ Existuji tri ruzne "status" vrstvy:
 
 To znamena jen to, ze job byl uspesne zadan do brokeru.
 
-#### 2. Worker statusy v topicu `image.done`
+#### 3. Worker statusy v topicu `image.done`
 
 Worker publikuje:
 
@@ -498,7 +529,7 @@ Typicky payload pri chybe:
 }
 ```
 
-#### 3. Haystack write ACK payload
+#### 4. Haystack write ACK payload
 
 Haystack node neposila `status`, ale metadata o umisteni objektu:
 

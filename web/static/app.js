@@ -3,6 +3,10 @@ const state = {
   user: null,
   socket: null,
   imageUrls: new Map(),
+  pendingRefreshTimer: null,
+  pendingRefreshInFlight: false,
+  pendingRefreshAttempts: 0,
+  trackedPendingKeys: new Set(),
 };
 
 const els = {
@@ -86,6 +90,9 @@ function clearSession() {
   state.user = null;
   localStorage.removeItem("cloudik_token");
   closeStatusSocket();
+  stopPendingRefresh();
+  state.pendingRefreshAttempts = 0;
+  state.trackedPendingKeys.clear();
 }
 
 function showAuth() {
@@ -150,6 +157,67 @@ async function loadObjects() {
   const objects = await requestJson("/me/objects");
   els.galleryMeta.textContent = objects.length === 1 ? "1 obrazek v osobnim bucketu" : `${objects.length} obrazku v osobnim bucketu`;
   renderObjects(objects);
+
+  const objectKeys = new Set(objects.map((item) => item.object_key));
+  for (const trackedKey of Array.from(state.trackedPendingKeys)) {
+    if (!objectKeys.has(trackedKey)) {
+      state.trackedPendingKeys.delete(trackedKey);
+    }
+  }
+
+  for (const item of objects) {
+    if (state.trackedPendingKeys.has(item.object_key) && item.status === "ready") {
+      state.trackedPendingKeys.delete(item.object_key);
+    }
+  }
+
+  const hasTrackedUploading = objects.some(
+    (item) => state.trackedPendingKeys.has(item.object_key) && item.status === "uploading",
+  );
+
+  if (hasTrackedUploading) {
+    schedulePendingRefresh();
+  } else {
+    stopPendingRefresh();
+    state.pendingRefreshAttempts = 0;
+  }
+}
+
+function stopPendingRefresh() {
+  if (state.pendingRefreshTimer) {
+    clearTimeout(state.pendingRefreshTimer);
+    state.pendingRefreshTimer = null;
+  }
+}
+
+function schedulePendingRefresh(delayMs = 1500) {
+  if (state.pendingRefreshTimer || !state.token) {
+    return;
+  }
+  state.pendingRefreshTimer = window.setTimeout(async () => {
+    state.pendingRefreshTimer = null;
+    if (state.pendingRefreshInFlight || !state.token) {
+      schedulePendingRefresh(delayMs);
+      return;
+    }
+
+    if (state.pendingRefreshAttempts >= 20) {
+      state.trackedPendingKeys.clear();
+      state.pendingRefreshAttempts = 0;
+      showAlert(els.appAlert, "Upload porad ceka na potvrzeni z Haystack. Zkontroluj, jestli bezi haystack_node.py.", "warning");
+      return;
+    }
+
+    state.pendingRefreshInFlight = true;
+    state.pendingRefreshAttempts += 1;
+    try {
+      await Promise.all([loadObjects(), loadBilling()]);
+    } catch {
+      schedulePendingRefresh(2500);
+    } finally {
+      state.pendingRefreshInFlight = false;
+    }
+  }, delayMs);
 }
 
 function renderObjects(objects) {
@@ -160,21 +228,27 @@ function renderObjects(objects) {
   els.gallery.innerHTML = "";
 
   if (objects.length === 0) {
+    stopPendingRefresh();
     els.gallery.innerHTML = `<div class="empty-state">Zatim tu neni zadny obrazek.</div>`;
     return;
   }
 
   for (const item of objects) {
     const safeKey = escapeHtml(item.object_key);
+    const isReady = item.status === "ready";
+    const objectId = item.object_id || item.record_id;
+    const statusLabel = isReady ? "ready" : "uploading";
+    const sizeLabel = isReady ? bytes(item.size) : "cekam na potvrzeni ulozeni";
     const card = document.createElement("article");
     card.className = "picture-card";
     card.innerHTML = `
       <img class="picture-preview" alt="${safeKey}">
       <div class="picture-body">
         <div class="picture-title">${safeKey}</div>
-        <div class="picture-meta mb-3">${bytes(item.size)}</div>
+        <div class="picture-meta">${sizeLabel}</div>
+        <div class="picture-meta mb-3">stav: ${statusLabel}</div>
         <div class="vstack gap-2">
-          <select class="form-select operation-select">
+          <select class="form-select operation-select" ${isReady ? "" : "disabled"}>
             <option value="grayscale">Grayscale</option>
             <option value="invert">Invert</option>
             <option value="flip">Flip</option>
@@ -183,8 +257,8 @@ function renderObjects(objects) {
           </select>
           <div class="operation-fields"></div>
           <div class="d-flex gap-2 flex-wrap">
-            <button class="btn btn-cloud process-btn" type="button"><i class="bi bi-magic"></i> Upravit</button>
-            <button class="btn btn-outline-secondary download-btn" type="button"><i class="bi bi-download"></i> Stahnout</button>
+            <button class="btn btn-cloud process-btn" type="button" ${isReady ? "" : "disabled"}><i class="bi bi-magic"></i> Upravit</button>
+            <button class="btn btn-outline-secondary download-btn" type="button" ${isReady ? "" : "disabled"}><i class="bi bi-download"></i> Stahnout</button>
             <button class="btn btn-outline-danger delete-btn" type="button"><i class="bi bi-trash"></i> Smazat</button>
           </div>
         </div>
@@ -197,12 +271,16 @@ function renderObjects(objects) {
 
     operationSelect.addEventListener("change", () => renderOperationFields(operationSelect.value, fields));
     card.querySelector(".process-btn").addEventListener("click", () => processObject(item.object_key, card));
-    card.querySelector(".download-btn").addEventListener("click", () => downloadObject(item.object_key));
-    card.querySelector(".delete-btn").addEventListener("click", () => deleteObject(item.object_key));
+    card.querySelector(".download-btn").addEventListener("click", () => downloadObject(objectId, item.object_key));
+    card.querySelector(".delete-btn").addEventListener("click", () => deleteObject(objectId, item.object_key));
 
     renderOperationFields(operationSelect.value, fields);
     els.gallery.appendChild(card);
-    loadPreview(item.object_key, img);
+    if (isReady) {
+      loadPreview(item.object_key, img);
+    } else {
+      img.alt = "Upload probiha";
+    }
   }
 }
 
@@ -271,14 +349,17 @@ async function processObject(objectKey, card) {
   }
 }
 
-async function downloadObject(objectKey) {
+async function downloadObject(objectId, objectKey) {
   try {
-    const response = await fetch(`/me/objects/${encodeURIComponent(objectKey)}?download=${Date.now()}`, {
+    const response = await fetch(`/download/${encodeURIComponent(objectId)}?download=${Date.now()}`, {
       headers: authHeaders(),
       cache: "no-store",
     });
     if (!response.ok) {
-      throw new Error("Download failed");
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json") ? await response.json() : await response.text();
+      const detail = typeof payload === "object" ? payload.detail : payload;
+      throw new Error(detail || "Download failed");
     }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -292,9 +373,9 @@ async function downloadObject(objectKey) {
   }
 }
 
-async function deleteObject(objectKey) {
+async function deleteObject(objectId, objectKey) {
   try {
-    await requestJson(`/me/objects/${encodeURIComponent(objectKey)}`, { method: "DELETE" });
+    await requestJson(`/download/${encodeURIComponent(objectId)}`, { method: "DELETE" });
     showAlert(els.appAlert, `${objectKey}: smazano`, "success");
     await Promise.all([loadObjects(), loadBilling()]);
   } catch (error) {
@@ -331,7 +412,11 @@ function connectStatusSocket() {
       return;
     }
     if (payload.status === "completed") {
-      showAlert(els.appAlert, `${payload.object_key}: hotovo`, "success");
+      if (payload.object_key) {
+        state.trackedPendingKeys.add(payload.object_key);
+      }
+      state.pendingRefreshAttempts = 0;
+      showAlert(els.appAlert, `${payload.object_key}: zpracovano, cekam na ulozeni`, "info");
       await Promise.all([loadObjects(), loadBilling()]);
     }
     if (payload.status === "failed") {
@@ -380,18 +465,23 @@ els.uploadForm.addEventListener("submit", async (event) => {
   body.append("file", file, objectKey);
 
   try {
-    await fetch(`/me/objects/${encodeURIComponent(objectKey)}`, {
+    const accepted = await fetch(`/me/objects/${encodeURIComponent(objectKey)}`, {
       method: "PUT",
       headers: authHeaders(),
       body,
     }).then(async (response) => {
+      const payload = await response.json();
       if (!response.ok) {
-        const payload = await response.json();
         throw new Error(payload.detail || "Upload failed");
       }
+      return payload;
     });
+    if (accepted?.object_key) {
+      state.trackedPendingKeys.add(accepted.object_key);
+    }
+    state.pendingRefreshAttempts = 0;
     els.uploadForm.reset();
-    showAlert(els.appAlert, `${objectKey}: nahrano`, "success");
+    showAlert(els.appAlert, `${objectKey}: prijato, cekam na ulozeni do Haystack`, "info");
     await Promise.all([loadObjects(), loadBilling()]);
   } catch (error) {
     showAlert(els.appAlert, error.message, "danger");

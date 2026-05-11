@@ -60,9 +60,22 @@ class ObjectResponse(StrictSchema):
     """Object metadata returned by bucket/object endpoints."""
 
     record_id: str
+    object_id: str | None = None
     bucket_id: str
     object_key: str
     size: int
+    status: Literal["uploading", "ready"]
+
+
+class UploadAcceptedResponse(StrictSchema):
+    """Immediate 202 response returned after enqueuing a storage write."""
+
+    status: Literal["accepted"]
+    topic: str
+    bucket_id: str
+    object_key: str
+    record_id: str
+    object_id: str
 
 
 class BucketBilling(StrictSchema):
@@ -204,3 +217,41 @@ class StorageAckPayload(StrictSchema):
     volume_id: int = Field(ge=1)
     offset: int = Field(ge=0)
     size: int = Field(ge=0)
+
+
+class StorageCompactionObject(StrictSchema):
+    """Ready non-deleted object currently stored inside one Haystack volume."""
+
+    record_id: str
+    object_id: str
+    bucket_id: str
+    object_key: str
+    volume_id: int = Field(ge=1)
+    offset: int = Field(ge=0)
+    size: int = Field(ge=0)
+
+
+class StorageCompactionListResponse(StrictSchema):
+    """List of active objects that still reference one source volume."""
+
+    volume_id: int = Field(ge=1)
+    objects: list[StorageCompactionObject] = Field(default_factory=list)
+
+
+class StorageCompactionUpdateRequest(StrictSchema):
+    """Internal relocation payload emitted by the compaction script."""
+
+    source_volume_id: int = Field(ge=1)
+    target_volume_id: int = Field(ge=1)
+    target_offset: int = Field(ge=0)
+    size: int = Field(ge=0)
+
+
+class StorageCompactionUpdateResponse(StrictSchema):
+    """Gateway reply after one object relocation update."""
+
+    status: Literal["updated", "ignored"]
+    object_id: str
+    record_id: str | None = None
+    volume_id: int | None = None
+    offset: int | None = None

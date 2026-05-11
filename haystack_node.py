@@ -34,6 +34,7 @@ RECONNECT_BASE = 1.0
 RECONNECT_MAX = 30.0
 ACK_ATTEMPTS = 3
 ACK_RESPONSE_TIMEOUT = 2.0
+BROKER_MAX_MESSAGE_SIZE = int(os.getenv("HAYSTACK_BROKER_MAX_MESSAGE_SIZE_BYTES", "0")) or None
 
 
 class HaystackVolumeStore:
@@ -125,23 +126,42 @@ class HaystackVolumeStore:
         if self._active_handle is None or self._active_volume_id is None:
             raise RuntimeError("Active volume is not available")
 
-        current_end = self._active_handle.tell()
+        current_end = self._seek_to_active_volume_end_sync()
         if current_end > 0 and current_end + len(payload.data) > self.max_volume_size_bytes:
             self._rotate_volume_sync()
-            current_end = self._active_handle.tell()
+            current_end = self._seek_to_active_volume_end_sync()
 
-        offset = current_end
-        written = self._active_handle.write(payload.data)
-        if written != len(payload.data):
-            raise IOError("Volume write was incomplete")
+        offset, size = self._append_to_active_volume_sync(payload.data, expected_offset=current_end)
         self._active_handle.flush()
 
         return schemas.StorageAckPayload(
             object_id=payload.object_id,
             volume_id=self._active_volume_id,
             offset=offset,
-            size=len(payload.data),
+            size=size,
         )
+
+    def _seek_to_active_volume_end_sync(self) -> int:
+        """Move the active file pointer to the end and return the current offset."""
+        if self._active_handle is None:
+            raise RuntimeError("Active volume handle is not available")
+        self._active_handle.seek(0, os.SEEK_END)
+        return self._active_handle.tell()
+
+    def _append_to_active_volume_sync(self, payload: bytes, *, expected_offset: int | None = None) -> tuple[int, int]:
+        """Append payload bytes to the active volume using the standard seek/tell/write flow."""
+        if self._active_handle is None:
+            raise RuntimeError("Active volume handle is not available")
+
+        offset = self._seek_to_active_volume_end_sync()
+        if expected_offset is not None and offset != expected_offset:
+            raise IOError(f"Active volume offset changed unexpectedly: expected {expected_offset}, got {offset}")
+
+        written = self._active_handle.write(payload)
+        size = len(payload)
+        if written != size:
+            raise IOError("Volume write was incomplete")
+        return offset, size
 
     async def read_chunk(self, volume_id: int, offset: int, size: int) -> bytes:
         """Read an exact byte range from one volume file."""
@@ -168,10 +188,15 @@ class HaystackVolumeStore:
                 raise ValueError("Requested byte range exceeds the selected volume")
 
             handle.seek(offset)
-            data = handle.read(size)
-            if len(data) != size:
-                raise ValueError("Could not read the requested byte range")
-            return data
+            return HaystackVolumeStore._read_exact_bytes_sync(handle, size)
+
+    @staticmethod
+    def _read_exact_bytes_sync(handle, size: int) -> bytes:
+        """Read exactly ``size`` bytes from the current file position."""
+        data = handle.read(size)
+        if len(data) != size:
+            raise ValueError("Could not read the requested byte range")
+        return data
 
 
 def build_broker_uri(topic: str, *, role: str = "subscriber", durable: bool = True, mode: str = "json") -> str:
@@ -195,7 +220,7 @@ async def publish_storage_ack(ack_payload: schemas.StorageAckPayload) -> None:
         topic=ACK_TOPIC,
         payload=ack_payload.model_dump(),
     ).model_dump()
-    async with websockets.connect(uri) as ws:
+    async with websockets.connect(uri, max_size=BROKER_MAX_MESSAGE_SIZE) as ws:
         await ws.send(json.dumps(envelope))
 
 
@@ -206,7 +231,7 @@ async def acknowledge_broker_message(message_id: int) -> bool:
 
     for attempt in range(1, ACK_ATTEMPTS + 1):
         try:
-            async with websockets.connect(uri) as ws:
+            async with websockets.connect(uri, max_size=BROKER_MAX_MESSAGE_SIZE) as ws:
                 await ws.send(json.dumps(envelope))
                 raw = await asyncio.wait_for(ws.recv(), timeout=ACK_RESPONSE_TIMEOUT)
                 response = decode_wire_message(raw)
@@ -267,7 +292,7 @@ async def run_storage_subscriber(stop_event: asyncio.Event, store: HaystackVolum
         try:
             broker_uri = build_broker_uri(WRITE_TOPIC, role="subscriber", durable=True, mode="msgpack")
             print(f"[HAYSTACK] Connecting to broker: {broker_uri}")
-            async with websockets.connect(broker_uri) as ws:
+            async with websockets.connect(broker_uri, max_size=BROKER_MAX_MESSAGE_SIZE) as ws:
                 print(f"[HAYSTACK] Connected to broker: {broker_uri}")
                 backoff = RECONNECT_BASE
 
@@ -292,10 +317,10 @@ async def run_storage_subscriber(stop_event: asyncio.Event, store: HaystackVolum
                     await handle_storage_delivery(raw, store)
         except asyncio.CancelledError:
             raise
-        except websockets.exceptions.ConnectionClosed:
+        except websockets.exceptions.ConnectionClosed as exc:
             if stop_event.is_set():
                 break
-            print("[HAYSTACK] Broker connection closed.")
+            print(f"[HAYSTACK] Broker connection closed: code={exc.code} reason={exc.reason!r}")
         except Exception as exc:
             print(f"[HAYSTACK] Broker subscriber error: {exc}")
 
